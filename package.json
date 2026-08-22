@@ -1,0 +1,10 @@
+{
+  "name": "fampay-fast-api",
+  "version": "1.0.0",
+  "description": "Ultra Fast FamPay/UPI UTR Auto Verifier",
+  "main": "api/check.js",
+  "dependencies": {
+    "imap-simple": "^5.1.0",
+    "mailparser": "^3.7.1"
+  }
+}
