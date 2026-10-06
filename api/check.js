@@ -70,7 +70,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Sabse latest matching email fetch karo
+    // Get latest matching email
     const latestMessage = messages[messages.length - 1];
     const fullBodyPart = latestMessage.parts.find(part => part.which === '') || latestMessage.parts[0];
     const parsed = await simpleParser(fullBodyPart.body);
@@ -80,59 +80,81 @@ module.exports = async (req, res) => {
     const emailDate = parsed.date ? parsed.date.toISOString() : new Date().toISOString();
     const sender = parsed.from ? parsed.from.text : 'Unknown';
 
-    // Clean content — collapse whitespace
+    // Clean content — collapse all whitespace into single spaces
     const cleanContent = (emailSubject + ' ' + rawBody)
-      .replace(/\s+/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
       .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim();
 
     /* ============================================================
-       🔥 EXACT FamApp Email Format Extraction
-       Format: "You have successfully received ₹44.89 from Aryan raj"
+       🔥 EXACT AMOUNT EXTRACTION
+       FamApp email format:
+         "You have successfully received ₹25.0 from Manas Dalabehera"
+       We need to capture: 25.0 (with decimal preserved!)
        ============================================================ */
 
-    let amount = "0";
+    let amount = 0;
     let receiver = "";
     let matched = false;
 
     // PRIMARY PATTERN — exact FamApp phrase
-    // Matches: "You have successfully received ₹44.89 from Aryan raj"
-    const primaryPattern = /You\s+have\s+successfully\s+received\s+([₹Rs\.]*\s*[\d,]+(?:\.\d{1,2})?)/i;
+    // Captures: ₹25.0, ₹44.89, Rs.100, INR 500.50 etc.
+    // KEY FIX: Decimal part is [0-9]+ (1 or more) instead of {1,2}
+    const primaryPattern = /You\s+have\s+successfully\s+received\s+(?:Rs\.?|INR|₹)?\s*([0-9]+(?:[,.][0-9]+)*)/i;
     const primaryMatch = cleanContent.match(primaryPattern);
 
     if (primaryMatch && primaryMatch[1]) {
-      const rawAmount = primaryMatch[1].replace(/[₹Rs\.\s]/gi, '').replace(/,/g, '');
+      // Remove commas (Indian number format like 1,00,000)
+      const rawAmount = primaryMatch[1].replace(/,/g, '');
       const parsedAmount = parseFloat(rawAmount);
       if (!isNaN(parsedAmount) && parsedAmount > 0) {
-        amount = parsedAmount.toFixed(2);
+        amount = parsedAmount;
         matched = true;
       }
     }
 
-    // Extract "from <Sender Name>" if present
+    // Extract sender name ("from <Name>")
     if (matched) {
-      const senderPattern = /You\s+have\s+successfully\s+received\s+[₹Rs\.]*\s*[\d,]+(?:\.\d{1,2})?\s+from\s+([A-Za-z][A-Za-z\s\.]{1,60})/i;
+      const senderPattern = /You\s+have\s+successfully\s+received\s+(?:Rs\.?|INR|₹)?\s*[0-9]+(?:[,.][0-9]+)*\s+from\s+([A-Za-z][A-Za-z\s\.]{1,80})/i;
       const senderMatch = cleanContent.match(senderPattern);
       if (senderMatch && senderMatch[1]) {
         receiver = senderMatch[1].trim();
       }
     }
 
-    // SECONDARY FALLBACK — if primary didn't match, try looser patterns
+    // SECONDARY FALLBACK — Subject line pattern
+    // "You received ₹25.0 in your FamX account"
     if (!matched) {
-      const fallbackPatterns = [
-        /successfully\s+received\s+([₹Rs\.]*\s*[\d,]+(?:\.\d{1,2})?)/i,
-        /received\s+([₹Rs\.]*\s*[\d,]+(?:\.\d{1,2})?)\s+from/i,
-        /(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)\s+(?:credited|received|deposited)/i,
+      const subjectPattern = /You\s+received\s+(?:Rs\.?|INR|₹)\s*([0-9]+(?:[,.][0-9]+)*)/i;
+      const subjectMatch = cleanContent.match(subjectPattern);
+      if (subjectMatch && subjectMatch[1]) {
+        const rawAmount = subjectMatch[1].replace(/,/g, '');
+        const parsedAmount = parseFloat(rawAmount);
+        if (!isNaN(parsedAmount) && parsedAmount > 0) {
+          amount = parsedAmount;
+          matched = true;
+        }
+      }
+    }
+
+    // TERTIARY FALLBACK — Loose patterns
+    if (!matched) {
+      const loosePatterns = [
+        /successfully\s+received\s+(?:Rs\.?|INR|₹)?\s*([0-9]+(?:[,.][0-9]+)*)/i,
+        /received\s+(?:Rs\.?|INR|₹)\s*([0-9]+(?:[,.][0-9]+)*)/i,
+        /(?:Rs\.?|INR|₹)\s*([0-9]+(?:[,.][0-9]+)*)\s+(?:credited|received|deposited)/i,
+        /credited\s+(?:Rs\.?|INR|₹)?\s*([0-9]+(?:[,.][0-9]+)*)/i,
       ];
-      for (const pattern of fallbackPatterns) {
+      for (const pattern of loosePatterns) {
         const m = cleanContent.match(pattern);
         if (m && m[1]) {
-          const rawAmt = m[1].replace(/[₹Rs\.\s]/gi, '').replace(/,/g, '');
+          const rawAmt = m[1].replace(/,/g, '');
           const parsedAmt = parseFloat(rawAmt);
-          // Sanity: amount should not equal UTR, and be positive
+          // Skip if it matches UTR number
           if (!isNaN(parsedAmt) && parsedAmt > 0 && rawAmt !== utr) {
-            amount = parsedAmt.toFixed(2);
+            amount = parsedAmt;
             matched = true;
             break;
           }
@@ -143,9 +165,9 @@ module.exports = async (req, res) => {
     connection.end();
 
     /* ============================================================
-       FINAL RESPONSE — Clean & Simple
+       FINAL RESPONSE
        ============================================================ */
-    if (!matched || parseFloat(amount) <= 0) {
+    if (!matched || amount <= 0) {
       return res.status(404).json({
         status: 'error',
         utr: utr,
@@ -153,14 +175,17 @@ module.exports = async (req, res) => {
       });
     }
 
+    // Round to 2 decimals (safe)
+    const finalAmount = Math.round(amount * 100) / 100;
+
     // SUCCESS
     return res.status(200).json({
       status: 'success',
       code: 200,
-      amount: parseFloat(amount),        // 👈 Direct amount at top level
+      amount: finalAmount,                    // ✅ Correct: 25.0 (not 250!)
       data: {
         utr: utr,
-        amount: parseFloat(amount),
+        amount: finalAmount,
         sender: receiver || sender,
         date: emailDate,
         subject: emailSubject,
