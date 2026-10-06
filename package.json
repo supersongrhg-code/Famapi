@@ -1,7 +1,7 @@
 {
   "name": "fampay-fast-api",
-  "version": "1.0.0",
-  "description": "Ultra Fast FamPay/UPI UTR Auto Verifier",
+  "version": "2.0.0",
+  "description": "Ultra Fast FamPay/UPI UTR Auto Verifier — Exact Amount Match",
   "main": "api/check.js",
   "dependencies": {
     "imap-simple": "^5.1.0",
